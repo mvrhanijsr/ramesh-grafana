@@ -1,0 +1,42 @@
+# =============================================================================
+# EFS StorageClass + PVC for dynamic PV provisioning
+# =============================================================================
+# Apply in order:
+#   kubectl apply -f efs-storage.yaml
+# =============================================================================
+
+---
+# -----------------------------------------------------------------------------
+# StorageClass — dynamically creates EFS Access Points as PVs
+# -----------------------------------------------------------------------------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap                # Dynamic provisioning via Access Points
+  fileSystemId: fs-038e3bc5268b98d8c      # Your EFS file system ID
+  directoryPerms: "700"                   # Access Point root directory permissions
+  uid: "1000"                             # Owner UID for the Access Point root dir
+  gid: "1000"                             # Owner GID for the Access Point root dir
+reclaimPolicy: Delete                     # Delete Access Point when PVC is deleted
+volumeBindingMode: Immediate              # Bind PV immediately on PVC creation
+allowVolumeExpansion: true
+
+# ---
+# -----------------------------------------------------------------------------
+# PVC — requests storage from the EFS StorageClass
+# -----------------------------------------------------------------------------
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: efs-app-pvc
+#   namespace: default                      # Change to your app namespace
+# spec:
+#   accessModes:
+#     - ReadWriteMany                       # EFS supports RWX (multiple pods, multiple nodes)
+#   storageClassName: efs-sc
+#   resources:
+#     requests:
+#       storage: 1Gi                        # EFS is elastic — this is a label, not a hard limit
