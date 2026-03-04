@@ -1,0 +1,187 @@
+# =============================================================================
+# Grafana — Self-hosted on EKS with EFS persistent storage
+# =============================================================================
+# Apply in order:
+#   1. kubectl apply -f efs-storage.yaml          (StorageClass — if not already applied)
+#   2. kubectl apply -f grafana.yaml              (this file)
+#
+# Access:
+#   Default login → admin / admin (you'll be prompted to change on first login)
+#   Port-forward:  kubectl port-forward svc/grafana 3000:3000 -n monitoring
+#   Via ALB:       Add an Ingress (see bottom of file)
+# =============================================================================
+
+---
+# -----------------------------------------------------------------------------
+# Namespace
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+
+---
+# -----------------------------------------------------------------------------
+# PVC — Grafana data (dashboards, SQLite DB, plugins) on EFS
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# -----------------------------------------------------------------------------
+# ConfigMap — Grafana datasource (Prometheus placeholder)
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus-server.monitoring.svc.cluster.local:80
+        isDefault: true
+        editable: true
+
+---
+# -----------------------------------------------------------------------------
+# Deployment
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        fsGroup: 472          # Grafana GID
+        runAsUser: 472        # Grafana UID
+        runAsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.5.1
+          ports:
+            - containerPort: 3000
+              name: http
+              protocol: TCP
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: "admin"
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: "admin"                    # Change this or use a Secret
+            - name: GF_SERVER_ROOT_URL
+              value: "http://localhost:3000"     # Update to your domain if using Ingress
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: grafana-storage
+              mountPath: /var/lib/grafana       # Grafana data directory
+            - name: grafana-datasources
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+      volumes:
+        - name: grafana-storage
+          persistentVolumeClaim:
+            claimName: grafana-pvc
+        - name: grafana-datasources
+          configMap:
+            name: grafana-datasources
+
+---
+# -----------------------------------------------------------------------------
+# Service — ClusterIP (use with port-forward or Ingress)
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  type: ClusterIP
+  selector:
+    app: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+      name: http
+
+---
+# ---------------------------------------------------------------------------
+# Ingress — expose Grafana via ALB with HTTPS (TLS terminated at ALB)
+# ---------------------------------------------------------------------------
+# Flow: Client --HTTPS:443--> ALB (terminates TLS via ACM cert) --HTTP:3000--> Grafana Pod
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: monitoring
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:783435134051:certificate/59e94bfb-0108-4983-bc36-499d6870d2bb
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+    alb.ingress.kubernetes.io/success-codes: "200"
+spec:
+  rules:
+    - host: grafana.hrjsr.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
