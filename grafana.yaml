@@ -147,7 +147,7 @@ spec:
   selector:
     app: grafana
   ports:
-    - port: 3000
+    - port: 80
       targetPort: 3000
       protocol: TCP
       name: http
@@ -184,4 +184,4 @@ spec:
               service:
                 name: grafana
                 port:
-                  number: 3000
+                  number: 80
